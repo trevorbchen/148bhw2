@@ -10,13 +10,28 @@ from typing import Any
 
 from .log_utils import dump_config, make_run_dir, setup_logging
 from .prompts import COT_PROMPT_TEMPLATE, DIRECT_PROMPT_TEMPLATE
-from .rewards import answer_tag_reward_fn, extract_answer_from_tags
+from .rewards import answer_tag_reward_fn, extract_answer_from_tags, r1_zero_reward_fn
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-1.5B"
 DEFAULT_VALIDATION_SIZE = 256
+
+REWARD_FNS: dict[str, Callable[[str, str], dict[str, float]]] = {
+    "r1_zero": r1_zero_reward_fn,
+    "answer_tag": answer_tag_reward_fn,
+}
+
+
+def _resolve_reward_fn(name: str | None, mode: str) -> Callable[[str, str], dict[str, float]]:
+    """PDF p13: r1_zero is the GSM8K default. Direct prompt has no <think>, so we
+    fall back to answer_tag for direct mode unless the user overrides explicitly."""
+    if name is None or name == "auto":
+        return answer_tag_reward_fn if mode == "direct" else r1_zero_reward_fn
+    if name not in REWARD_FNS:
+        raise ValueError(f"Unknown reward fn: {name}. Choose from {list(REWARD_FNS)}.")
+    return REWARD_FNS[name]
 
 
 def load_gsm8k_examples(split: str) -> list[dict[str, Any]]:
@@ -153,13 +168,18 @@ def _resolve_run_dir(output_dir: Path | None, run_name: str) -> Path:
 def run_direct_baseline(
     output_dir: Path | None = None,
     model_name: str = DEFAULT_MODEL_NAME,
-    split: str = "test",
+    split: str = "train",
     limit: int | None = None,
+    reward_fn_name: str | None = None,
 ) -> dict[str, Any]:
+    reward_fn = _resolve_reward_fn(reward_fn_name, "direct")
     run_dir = _resolve_run_dir(output_dir, f"eval_direct_{split}")
     setup_logging(run_dir)
-    dump_config(run_dir, {"mode": "direct", "model_name": model_name, "split": split, "limit": limit})
-    logger.info("Run dir: %s", run_dir)
+    dump_config(run_dir, {
+        "mode": "direct", "model_name": model_name, "split": split, "limit": limit,
+        "reward_fn": reward_fn.__name__,
+    })
+    logger.info("Run dir: %s | reward_fn: %s", run_dir, reward_fn.__name__)
 
     examples = load_gsm8k_examples(split)
     if limit is not None:
@@ -171,7 +191,7 @@ def run_direct_baseline(
     llm = _load_vllm(model_name)
     result = evaluate_vllm(
         vllm_model=llm,
-        reward_fn=answer_tag_reward_fn,
+        reward_fn=reward_fn,
         prompts=prompts,
         eval_sampling_params=_base_sampling_params(),
         ground_truths=gts,
@@ -184,13 +204,18 @@ def run_direct_baseline(
 def run_cot_baseline(
     output_dir: Path | None = None,
     model_name: str = DEFAULT_MODEL_NAME,
-    split: str = "test",
+    split: str = "train",
     limit: int | None = None,
+    reward_fn_name: str | None = None,
 ) -> dict[str, Any]:
+    reward_fn = _resolve_reward_fn(reward_fn_name, "cot")
     run_dir = _resolve_run_dir(output_dir, f"eval_cot_{split}")
     setup_logging(run_dir)
-    dump_config(run_dir, {"mode": "cot", "model_name": model_name, "split": split, "limit": limit})
-    logger.info("Run dir: %s", run_dir)
+    dump_config(run_dir, {
+        "mode": "cot", "model_name": model_name, "split": split, "limit": limit,
+        "reward_fn": reward_fn.__name__,
+    })
+    logger.info("Run dir: %s | reward_fn: %s", run_dir, reward_fn.__name__)
 
     examples = load_gsm8k_examples(split)
     if limit is not None:
@@ -202,7 +227,7 @@ def run_cot_baseline(
     llm = _load_vllm(model_name)
     result = evaluate_vllm(
         vllm_model=llm,
-        reward_fn=answer_tag_reward_fn,
+        reward_fn=reward_fn,
         prompts=prompts,
         eval_sampling_params=_base_sampling_params(),
         ground_truths=gts,
@@ -216,17 +241,20 @@ def run_self_consistency_baseline(
     output_dir: Path | None = None,
     k: int = 5,
     model_name: str = DEFAULT_MODEL_NAME,
-    split: str = "test",
+    split: str = "train",
     limit: int | None = None,
+    reward_fn_name: str | None = None,
 ) -> dict[str, Any]:
     from vllm import SamplingParams
 
+    reward_fn = _resolve_reward_fn(reward_fn_name, "self_consistency")
     run_dir = _resolve_run_dir(output_dir, f"eval_selfcons_k{k}_{split}")
     setup_logging(run_dir)
     dump_config(run_dir, {
         "mode": "self_consistency", "k": k, "model_name": model_name, "split": split, "limit": limit,
+        "reward_fn": reward_fn.__name__,
     })
-    logger.info("Run dir: %s", run_dir)
+    logger.info("Run dir: %s | reward_fn: %s", run_dir, reward_fn.__name__)
 
     examples = load_gsm8k_examples(split)
     if limit is not None:
@@ -260,10 +288,11 @@ def run_self_consistency_baseline(
             majority = counts[0][0]
             if len(counts) > 1 and counts[1][1] == top_count:
                 tie_count += 1
-            synthesized = f"<answer>{majority}</answer>"
+            # Include the </think> marker so r1_zero_reward_fn passes format.
+            synthesized = f"</think> <answer>{majority}</answer>"
         else:
-            synthesized = "<answer></answer>"
-        info = answer_tag_reward_fn(synthesized, gts[i])
+            synthesized = "</think> <answer></answer>"
+        info = reward_fn(synthesized, gts[i])
         reward_sum += info["reward"]
         fmt_sum += info["format_reward"]
         ans_sum += info["answer_reward"]
@@ -301,9 +330,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate GSM8K zero-shot baselines with vLLM.")
     parser.add_argument("--mode", choices=["direct", "cot", "self_consistency"], default="direct")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--split", default="test")
+    parser.add_argument("--split", default="train", help="GSM8K split. PDF p13 asks for train.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--k", type=int, default=5, help="Number of samples for self-consistency.")
+    parser.add_argument(
+        "--reward-fn",
+        choices=["auto", *REWARD_FNS],
+        default="auto",
+        help="Reward fn. 'auto' = answer_tag for direct, r1_zero for cot/self_consistency (PDF p13).",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -313,11 +348,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.mode == "direct":
-        run_direct_baseline(args.output_dir, args.model_name, args.split, args.limit)
+        run_direct_baseline(args.output_dir, args.model_name, args.split, args.limit, args.reward_fn)
     elif args.mode == "cot":
-        run_cot_baseline(args.output_dir, args.model_name, args.split, args.limit)
+        run_cot_baseline(args.output_dir, args.model_name, args.split, args.limit, args.reward_fn)
     else:
-        run_self_consistency_baseline(args.output_dir, args.k, args.model_name, args.split, args.limit)
+        run_self_consistency_baseline(args.output_dir, args.k, args.model_name, args.split, args.limit, args.reward_fn)
 
 
 if __name__ == "__main__":

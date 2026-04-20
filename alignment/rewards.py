@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Iterable
 
-from .drgrpo_grader import grade
+from .drgrpo_grader import grade, r1_zero_reward_fn
 
 
 def extract_answer_from_tags(response: str) -> str | None:
