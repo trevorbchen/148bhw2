@@ -189,6 +189,8 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
         run_single_step(model, batch, config.mode, autocast, optimizer)
 
     maybe_start_memory_history(config.use_memory_profiler)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     logger.info("Measuring: %d steps", config.measure_steps)
     times: list[float] = []
@@ -199,6 +201,8 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
         run_single_step(model, batch, config.mode, autocast, optimizer)
         t1 = timeit.default_timer()
         times.append(t1 - t0)
+
+    peak_mem_mb = torch.cuda.max_memory_allocated() / (1024**2) if torch.cuda.is_available() else 0.0
 
     if config.use_memory_profiler:
         snap_path = run_dir / "memory.pickle"
@@ -213,6 +217,7 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
         "stddev_sec": stddev,
         "min_sec": min(times),
         "max_sec": max(times),
+        "peak_mem_mb": peak_mem_mb,
         "config": {
             "model_size": config.model_size,
             "context_length": config.context_length,
