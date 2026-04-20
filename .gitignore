@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Run outputs
+logs/
+artifacts/
+*.pickle
+*.pkl
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.qdrep
+*.nsys-rep
+*.sqlite
+test_results.xml
+eecs-148b-hw2-submission.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Course materials (don't redistribute)
+hw2.pdf
+
+# Out-of-place file from another project
+TPU_GUIDE.md
+
+# Wandb
+wandb/
